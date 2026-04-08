@@ -1,0 +1,232 @@
+// FinAgentX — Versioned Protobuf Contract Registry
+// Single source of truth for all service boundaries
+// Breaking change = version bump to v2
+syntax = "proto3";
+
+package finagentx.v1;
+
+option go_package = "github.com/finagentx/go-gateway/proto/v1;v1";
+
+// ─────────────────────────────────────────────
+// Agent Service — Core query + trace interface
+// ─────────────────────────────────────────────
+
+service AgentService {
+  // Submit a financial query for agentic processing
+  rpc SubmitQuery(QueryRequest) returns (QueryResponse);
+
+  // Retrieve the full reasoning trace for a session
+  rpc GetAgentTrace(TraceRequest) returns (TraceResponse);
+
+  // Stream real-time anomaly alerts
+  rpc StreamAlerts(AlertRequest) returns (stream Alert);
+}
+
+// ─────────────────────────────────────────────
+// Evaluation Service — Judge + metrics interface
+// ─────────────────────────────────────────────
+
+service EvaluationService {
+  rpc RunEvaluation(EvalRequest) returns (EvalResponse);
+  rpc GetEvalResults(EvalResultsRequest) returns (EvalResultsResponse);
+}
+
+// ─────────────────────────────────────────────
+// Feedback Service — Human-in-the-loop
+// ─────────────────────────────────────────────
+
+service FeedbackService {
+  rpc SubmitFeedback(FeedbackRequest) returns (FeedbackResponse);
+  rpc GetFeedbackStats(FeedbackStatsRequest) returns (FeedbackStatsResponse);
+}
+
+// ─────────────────────────────────────────────
+// Request / Response Messages
+// ─────────────────────────────────────────────
+
+message QueryRequest {
+  string session_id = 1;
+  string query = 2;
+  string user_id = 3;
+  repeated string document_ids = 4;
+  string intent = 5;               // classified intent (spend_analysis, anomaly, comparison, report)
+  map<string, string> metadata = 6; // arbitrary metadata (date_range, category filters)
+}
+
+message QueryResponse {
+  string session_id = 1;
+  string answer = 2;
+  repeated TraceStep steps = 3;
+  repeated Citation citations = 4;
+  float confidence = 5;
+  string intent = 6;
+  int64 total_latency_ms = 7;
+  int32 tokens_used = 8;
+  bool requires_approval = 9;      // Fix A3: human approval checkpoint
+}
+
+message TraceRequest {
+  string session_id = 1;
+}
+
+message TraceResponse {
+  string session_id = 1;
+  repeated TraceStep steps = 2;
+  string final_answer = 3;
+  float overall_confidence = 4;
+  int64 total_latency_ms = 5;
+  int32 total_tokens = 6;
+  repeated string risk_flags = 7;
+}
+
+message AlertRequest {
+  string user_id = 1;
+  repeated string tickers = 2;       // filter by specific tickers
+  float min_risk_score = 3;          // minimum risk score threshold
+}
+
+message Alert {
+  string alert_id = 1;
+  string ticker = 2;
+  string alert_type = 3;             // SPIKE, RECURRING_CHANGE, HIGH_RISK
+  float risk_score = 4;              // 0.0 - 1.0
+  string description = 5;
+  TransactionEvent source_event = 6;
+  string recommended_action = 7;
+  int64 timestamp = 8;
+}
+
+// ─────────────────────────────────────────────
+// Core Data Types
+// ─────────────────────────────────────────────
+
+message TraceStep {
+  string step_id = 1;
+  int32 step_number = 2;
+  string tool_name = 3;
+  string input_json = 4;
+  string output_json = 5;
+  int64 latency_ms = 6;
+  float confidence = 7;
+  string reasoning = 8;             // agent's reasoning for this step
+  repeated string risk_flags = 9;
+}
+
+message Citation {
+  string chunk_id = 1;
+  string document_id = 2;
+  string text = 3;
+  float relevance_score = 4;
+  map<string, string> metadata = 5;  // date, merchant, category, source page
+  bool is_grounded = 6;              // true if claim is grounded in this chunk
+}
+
+message TransactionEvent {
+  string event_id = 1;
+  string ticker = 2;
+  double price = 3;
+  int64 volume = 4;
+  double change_percent = 5;
+  string date = 6;
+  string category = 7;               // sector/industry
+  map<string, string> metadata = 8;
+}
+
+// ─────────────────────────────────────────────
+// Evaluation Messages
+// ─────────────────────────────────────────────
+
+message EvalRequest {
+  repeated EvalTestCase test_cases = 1;
+  string model_id = 2;
+}
+
+message EvalTestCase {
+  string query = 1;
+  string expected_answer = 2;
+  repeated string expected_citations = 3;
+}
+
+message EvalResponse {
+  string eval_run_id = 1;
+  int32 total_cases = 2;
+  float avg_correctness = 3;
+  float avg_faithfulness = 4;
+  float hallucination_rate = 5;
+  float retrieval_precision_at_k = 6;
+  repeated EvalCaseResult results = 7;
+}
+
+message EvalResultsRequest {
+  string eval_run_id = 1;
+}
+
+message EvalResultsResponse {
+  repeated EvalCaseResult results = 1;
+}
+
+message EvalCaseResult {
+  string query = 1;
+  string generated_answer = 2;
+  string expected_answer = 3;
+  float correctness = 4;
+  float faithfulness = 5;
+  bool hallucination_detected = 6;
+  repeated string grounded_claims = 7;
+  repeated string ungrounded_claims = 8;
+  string judge_reasoning = 9;
+}
+
+// ─────────────────────────────────────────────
+// Feedback Messages
+// ─────────────────────────────────────────────
+
+message FeedbackRequest {
+  string session_id = 1;
+  string user_id = 2;
+  FeedbackType feedback_type = 3;
+  string correction = 4;            // optional corrected answer
+  string comment = 5;
+}
+
+enum FeedbackType {
+  FEEDBACK_TYPE_UNSPECIFIED = 0;
+  THUMBS_UP = 1;
+  THUMBS_DOWN = 2;
+  CORRECTION = 3;
+}
+
+message FeedbackResponse {
+  string feedback_id = 1;
+  bool accepted = 2;
+}
+
+message FeedbackStatsRequest {
+  string time_range = 1;            // "24h", "7d", "30d"
+}
+
+message FeedbackStatsResponse {
+  int32 total_feedback = 1;
+  int32 positive = 2;
+  int32 negative = 3;
+  int32 corrections = 4;
+  float satisfaction_rate = 5;
+  repeated string top_failure_queries = 6;
+}
+
+// ─────────────────────────────────────────────
+// Audit Entry (for hash chain logging)
+// ─────────────────────────────────────────────
+
+message AuditEntry {
+  int64 timestamp = 1;
+  string session_id = 2;
+  string user_id = 3;
+  string action = 4;
+  string tool_called = 5;
+  string input = 6;
+  string output = 7;
+  float confidence = 8;
+  string prev_hash = 9;              // hash chain — tamper evident
+  string hash = 10;
+}

@@ -1,0 +1,40 @@
+# FinAgentX — Python AI Core Dependencies
+
+# Core Framework
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.0
+pydantic-settings==2.2.1
+
+# LLM + Agentic
+langchain-core==0.2.0
+langgraph==0.2.0
+httpx==0.27.0
+
+# RAG Pipeline
+pdfplumber==0.11.0
+weaviate-client==4.6.0
+sentence-transformers==3.0.0
+
+# Security
+presidio-analyzer==2.2.354
+presidio-anonymizer==2.2.354
+PyJWT==2.8.0
+cryptography==42.0.0
+
+# Caching
+redis==5.0.0
+
+# Observability
+prometheus-client==0.20.0
+structlog==24.1.0
+
+# Evaluation
+# (uses httpx for Cerebras API calls)
+
+# Development & Testing
+pytest==8.2.0
+pytest-asyncio==0.23.0
+pytest-cov==5.0.0
+ruff==0.4.0
+mypy==1.10.0

@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ts-dashboard
+  namespace: finagentx
+  labels:
+    app: ts-dashboard
+    component: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ts-dashboard
+  template:
+    metadata:
+      labels:
+        app: ts-dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: finagentx/ts-dashboard:latest
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: NEXT_PUBLIC_API_URL
+              value: "http://go-gateway-svc:8080"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ts-dashboard-svc
+  namespace: finagentx
+spec:
+  selector:
+    app: ts-dashboard
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+  type: LoadBalancer

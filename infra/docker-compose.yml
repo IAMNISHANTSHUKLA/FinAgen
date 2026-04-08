@@ -1,0 +1,278 @@
+# FinAgentX — Local Development Stack
+# All infrastructure services for local development
+# Production: replace with managed services (AWS MSK, ElastiCache, S3, etc.)
+
+version: "3.9"
+
+services:
+  # ─────────────────────────────────────────
+  # Apache Kafka + Zookeeper
+  # ─────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: finagentx-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+    healthcheck:
+      test: ["CMD", "echo", "ruok", "|", "nc", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: finagentx-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: finagentx-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "
+      echo 'Creating Kafka topics...'
+      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 \
+        --topic transactions --partitions 6 --replication-factor 1
+      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 \
+        --topic anomaly-alerts --partitions 3 --replication-factor 1
+      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 \
+        --topic transactions-dlq --partitions 3 --replication-factor 1
+      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 \
+        --topic document-events --partitions 3 --replication-factor 1
+      echo 'Topics created successfully.'
+      "
+
+  # ─────────────────────────────────────────
+  # Weaviate Vector Database
+  # ─────────────────────────────────────────
+  weaviate:
+    image: semitechnologies/weaviate:1.24.10
+    container_name: finagentx-weaviate
+    ports:
+      - "8081:8080"
+      - "50051:50051"
+    environment:
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      DEFAULT_VECTORIZER_MODULE: "text2vec-transformers"
+      ENABLE_MODULES: "text2vec-transformers,reranker-transformers"
+      TRANSFORMERS_INFERENCE_API: "http://t2v-transformers:8080"
+      RERANKER_INFERENCE_API: "http://reranker:8080"
+      CLUSTER_HOSTNAME: "node1"
+    volumes:
+      - weaviate-data:/var/lib/weaviate
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/v1/.well-known/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  t2v-transformers:
+    image: semitechnologies/transformers-inference:sentence-transformers-all-MiniLM-L6-v2
+    container_name: finagentx-t2v
+    environment:
+      ENABLE_CUDA: "0"
+
+  reranker:
+    image: semitechnologies/reranker-transformers:cross-encoder-ms-marco-MiniLM-L-6-v2
+    container_name: finagentx-reranker
+    environment:
+      ENABLE_CUDA: "0"
+
+  # ─────────────────────────────────────────
+  # Redis — State + Cache + PII Token Store
+  # ─────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: finagentx-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # MinIO — S3-Compatible Object Storage
+  # ─────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: finagentx-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: finagentx
+      MINIO_ROOT_PASSWORD: finagentx-secret
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: finagentx-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "
+      mc alias set local http://minio:9000 finagentx finagentx-secret
+      mc mb --ignore-existing local/audit-logs
+      mc mb --ignore-existing local/financial-documents
+      mc mb --ignore-existing local/evaluation-results
+      echo 'MinIO buckets created.'
+      "
+
+  # ─────────────────────────────────────────
+  # Prometheus — Metrics Collection
+  # ─────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: finagentx-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # Grafana — Dashboards
+  # ─────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: finagentx-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: finagentx
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/finagent.json
+    volumes:
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+
+  # ─────────────────────────────────────────
+  # Application Services
+  # ─────────────────────────────────────────
+  python-ai-core:
+    build:
+      context: ../python-ai-core
+      dockerfile: Dockerfile
+    container_name: finagentx-ai-core
+    ports:
+      - "8000:8000"
+    environment:
+      - CEREBRAS_API_KEY=${CEREBRAS_API_KEY}
+      - REDIS_URL=redis://redis:6379/0
+      - WEAVIATE_URL=http://weaviate:8080
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=finagentx
+      - MINIO_SECRET_KEY=finagentx-secret
+      - JWT_PUBLIC_KEY=${JWT_PUBLIC_KEY}
+      - LOG_LEVEL=INFO
+    depends_on:
+      redis:
+        condition: service_healthy
+      weaviate:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  go-gateway:
+    build:
+      context: ../go-gateway
+      dockerfile: Dockerfile
+    container_name: finagentx-gateway
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+    environment:
+      - AI_CORE_URL=python-ai-core:8000
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - REDIS_URL=redis://redis:6379/1
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=finagentx
+      - MINIO_SECRET_KEY=finagentx-secret
+      - JWT_PUBLIC_KEY=${JWT_PUBLIC_KEY}
+      - LOG_LEVEL=info
+    depends_on:
+      - python-ai-core
+      - kafka
+      - minio
+
+  ts-dashboard:
+    build:
+      context: ../ts-dashboard
+      dockerfile: Dockerfile
+    container_name: finagentx-dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8080
+      - JWT_PUBLIC_KEY=${JWT_PUBLIC_KEY}
+    depends_on:
+      - go-gateway
+
+volumes:
+  zookeeper-data:
+  kafka-data:
+  weaviate-data:
+  redis-data:
+  minio-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  default:
+    name: finagentx-network
